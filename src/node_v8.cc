@@ -295,6 +295,154 @@ static void SetHeapStatistics(JSONWriter* writer, Isolate* isolate) {
   writer->json_arrayend();
 }
 
+static v8::Local<v8::Object> ConvertHeapStatsToJSObject(
+    v8::Isolate* isolate, const cppgc::HeapStatistics& stats) {
+  Local<Context> context = isolate->GetCurrentContext();
+  // Space Statistics
+  v8::LocalVector<v8::Value> spaceStatisticsArray(isolate);
+  for (size_t i = 0; i < stats.space_stats.size(); i++) {
+    const cppgc::HeapStatistics::SpaceStatistics& spaceStats =
+        stats.space_stats[i];
+    // Page Statistics
+    v8::LocalVector<v8::Value> pageStatisticsArray(isolate);
+    for (size_t j = 0; j < spaceStats.page_stats.size(); j++) {
+      const cppgc::HeapStatistics::PageStatistics& pageStats =
+          spaceStats.page_stats[j];
+      // Object Statistics
+      v8::LocalVector<v8::Value> objectStatisticsArray(isolate);
+      for (size_t k = 0; k < pageStats.object_statistics.size(); k++) {
+        const cppgc::HeapStatistics::ObjectStatsEntry& objectStats =
+            pageStats.object_statistics[k];
+        Local<v8::Name> objectStatsNames[] = {
+            objectStatsNames[0] =
+                FIXED_ONE_BYTE_STRING(isolate, "allocatedBytes"),
+            objectStatsNames[1] =
+                FIXED_ONE_BYTE_STRING(isolate, "objectCount")};
+        Local<v8::Value> objectStatsValues[] = {
+            objectStatsValues[0] =
+                ToV8Value(context, objectStats.allocated_bytes, isolate)
+                    .ToLocalChecked(),
+            objectStatsValues[1] =
+                ToV8Value(context, objectStats.object_count, isolate)
+                    .ToLocalChecked()};
+        Local<Object> objectStatsObj = Object::New(
+            isolate, v8::Null(isolate), objectStatsNames, objectStatsValues, 2);
+        objectStatisticsArray.emplace_back(objectStatsObj);
+      }
+
+      // Set page statistics
+      Local<v8::Name> pageStatsNames[] = {
+          FIXED_ONE_BYTE_STRING(isolate, "committedSizeBytes"),
+          FIXED_ONE_BYTE_STRING(isolate, "residentSizeBytes"),
+          FIXED_ONE_BYTE_STRING(isolate, "usedSizeBytes"),
+          FIXED_ONE_BYTE_STRING(isolate, "objectStatistics")};
+      Local<v8::Value> pageStatsValues[] = {
+          ToV8Value(context, pageStats.committed_size_bytes, isolate)
+              .ToLocalChecked(),
+          ToV8Value(context, pageStats.resident_size_bytes, isolate)
+              .ToLocalChecked(),
+          ToV8Value(context, pageStats.used_size_bytes, isolate)
+              .ToLocalChecked(),
+          Array::New(isolate, objectStatisticsArray.data(), objectStatisticsArray.size())};
+      Local<Object> pageStatsObject = Object::New(
+          isolate, v8::Null(isolate), pageStatsNames, pageStatsValues, 4);
+
+      pageStatisticsArray.emplace_back(pageStatsObject);
+    }
+
+    // Free List Statistics
+    Local<v8::Name> freeListStatisticsNames[] = {
+        FIXED_ONE_BYTE_STRING(isolate, "bucketSize"),
+        FIXED_ONE_BYTE_STRING(isolate, "freeCount"),
+        FIXED_ONE_BYTE_STRING(isolate, "freeSize")};
+    Local<v8::Value> freeListStatisticsValues[] = {
+        ToV8Value(context, spaceStats.free_list_stats.bucket_size, isolate)
+            .ToLocalChecked(),
+        ToV8Value(context, spaceStats.free_list_stats.free_count, isolate)
+            .ToLocalChecked(),
+        ToV8Value(context, spaceStats.free_list_stats.free_size, isolate)
+            .ToLocalChecked()};
+    Local<Object> freeListStatsObj = Object::New(isolate,
+                                                 v8::Null(isolate),
+                                                 freeListStatisticsNames,
+                                                 freeListStatisticsValues,
+                                                 3);
+
+    // Set Space Statistics
+    Local<v8::Name> spaceStatsNames[] = {
+        FIXED_ONE_BYTE_STRING(isolate, "name"),
+        FIXED_ONE_BYTE_STRING(isolate, "committedSizeBytes"),
+        FIXED_ONE_BYTE_STRING(isolate, "residentSizeBytes"),
+        FIXED_ONE_BYTE_STRING(isolate, "usedSizeBytes"),
+        FIXED_ONE_BYTE_STRING(isolate, "pageStats"),
+        FIXED_ONE_BYTE_STRING(isolate, "freeListStats")};
+    Local<v8::Value> spaceStatsValues[] = {
+        ToV8Value(context, stats.space_stats[i].name.c_str(), isolate)
+            .ToLocalChecked(),
+        ToV8Value(context, stats.space_stats[i].committed_size_bytes, isolate)
+            .ToLocalChecked(),
+        ToV8Value(context, stats.space_stats[i].resident_size_bytes, isolate)
+            .ToLocalChecked(),
+        ToV8Value(context, stats.space_stats[i].used_size_bytes, isolate)
+            .ToLocalChecked(),
+        Array::New(
+            isolate, pageStatisticsArray.data(), pageStatisticsArray.size()),
+        freeListStatsObj,
+    };
+    Local<Object> spaceStatsObject = Object::New(
+        isolate, v8::Null(isolate), spaceStatsNames, spaceStatsValues, 6);
+    spaceStatisticsArray.emplace_back(spaceStatsObject);
+  }
+
+  std::string detailLevel =
+      (stats.detail_level == cppgc::HeapStatistics::DetailLevel::kDetailed)
+          ? "kDetailed"
+          : "kBrief";
+
+  // Set heap statistics
+  Local<v8::Name> heapStatisticsNames[] = {
+      FIXED_ONE_BYTE_STRING(isolate, "committedSizeBytes"),
+      FIXED_ONE_BYTE_STRING(isolate, "residentSizeBytes"),
+      FIXED_ONE_BYTE_STRING(isolate, "usedSizeBytes"),
+      FIXED_ONE_BYTE_STRING(isolate, "detailLevel"),
+      FIXED_ONE_BYTE_STRING(isolate, "spaceStatistics"),
+      FIXED_ONE_BYTE_STRING(isolate, "typeNames")};
+
+  Local<v8::Value> heapStatisticsValues[] = {
+      ToV8Value(context, stats.committed_size_bytes, isolate).ToLocalChecked(),
+      ToV8Value(context, stats.resident_size_bytes, isolate).ToLocalChecked(),
+      ToV8Value(context, stats.used_size_bytes, isolate).ToLocalChecked(),
+      ToV8Value(context, detailLevel, isolate).ToLocalChecked(),
+      Array::New(
+          isolate, spaceStatisticsArray.data(), spaceStatisticsArray.size()),
+      ToV8Value(context, stats.type_names, isolate).ToLocalChecked()};
+
+  Local<Object> heapStatisticsObject = Object::New(
+      isolate, v8::Null(isolate), heapStatisticsNames, heapStatisticsValues, 6);
+
+  return heapStatisticsObject;
+}
+
+static void CollectCppHeapStatistics(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  v8::Isolate* isolate = args.GetIsolate();
+  v8::HandleScope handle_scope(isolate);
+
+  CHECK_EQ(args.Length(), 1);
+  CHECK(args[0]->IsInt32());
+  int detailLevel = args[0].As<v8::Int32>()->Value();
+
+  cppgc::HeapStatistics::DetailLevel detail_level =
+      detailLevel ? cppgc::HeapStatistics::DetailLevel::kDetailed
+                  : cppgc::HeapStatistics::DetailLevel::kBrief;
+
+  cppgc::HeapStatistics stats =
+      isolate->GetCppHeap()->CollectStatistics(detail_level);
+
+  v8::Local<v8::Object> result = ConvertHeapStatsToJSObject(isolate, stats);
+  args.GetReturnValue().Set(result);
+}
+
 static void BeforeGCCallback(Isolate* isolate,
                              v8::GCType gc_type,
                              v8::GCCallbackFlags flags,
@@ -440,6 +588,10 @@ void Initialize(Local<Object> target,
             target,
             "updateHeapCodeStatisticsBuffer",
             UpdateHeapCodeStatisticsBuffer);
+  SetMethod(context,
+            target,
+            "collectCppHeapStatistics",
+            CollectCppHeapStatistics);
 
   size_t number_of_heap_spaces = env->isolate()->NumberOfHeapSpaces();
 
@@ -498,6 +650,7 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(GCProfiler::New);
   registry->Register(GCProfiler::Start);
   registry->Register(GCProfiler::Stop);
+  registry->Register(CollectCppHeapStatistics);
 }
 
 }  // namespace v8_utils
