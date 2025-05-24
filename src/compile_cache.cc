@@ -13,6 +13,9 @@
 #include <unistd.h>  // getuid
 #endif
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
 namespace node {
 
 using v8::Function;
@@ -223,13 +226,49 @@ void CompileCacheHandler::ReadCacheFile(CompileCacheEntry* entry) {
   Debug(" success, size=%d\n", total_read);
 }
 
+static std::string GetRelativePath(std::string_view path,
+                                   std::string_view base) {
+// On Windows, the native encoding is UTF-16, so we need to convert
+// the paths to wide strings before using std::filesystem::path.
+// On other platforms, std::filesystem::path can handle UTF-8 directly.
+#ifdef _WIN32
+  std::filesystem::path module_path(
+      ConvertToWideString(std::string(path), CP_UTF8));
+  std::filesystem::path base_path(
+      ConvertToWideString(std::string(base), CP_UTF8));
+#else
+  std::filesystem::path module_path(path);
+  std::filesystem::path base_path(base);
+#endif
+  std::filesystem::path relative = module_path.lexically_relative(base_path);
+  auto u8str = relative.u8string();
+  return std::string(u8str.begin(), u8str.end());
+}
+
 CompileCacheEntry* CompileCacheHandler::GetOrInsert(Local<String> code,
                                                     Local<String> filename,
                                                     CachedCodeType type) {
   DCHECK(!compile_cache_dir_.empty());
 
   Utf8Value filename_utf8(isolate_, filename);
-  uint32_t key = GetCacheKey(filename_utf8.ToStringView(), type);
+  std::string file_path = filename_utf8.ToString();
+  // If the relative path is enabled, we try to use a relative path
+  // from the compile cache directory to the file path
+  if (portable_ && IsAbsoluteFilePath(file_path)) {
+    // Normalize the path to ensure it is consistent.
+    std::string normalized_file_path = NormalizePath(file_path);
+         Debug("[compile cache] Normalized Path: %s\n",
+      normalized_file_path.data());
+    std::string relative_path =
+        GetRelativePath(normalized_file_path, normalized_compile_cache_dir_);
+    if (!relative_path.empty()) {
+      file_path = relative_path;
+      Debug("[compile cache] using relative path %s from %s\n",
+            file_path.c_str(),
+            absolute_compile_cache_dir_.c_str());
+    }
+  }
+  uint32_t key = GetCacheKey(file_path, type);
 
   // TODO(joyeecheung): don't encode this again into UTF8. If we read the
   // UTF8 content on disk as raw buffer (from the JS layer, while watching out
@@ -500,11 +539,15 @@ CompileCacheHandler::CompileCacheHandler(Environment* env)
 //   - $NODE_VERSION-$ARCH-$CACHE_DATA_VERSION_TAG-$UID
 //     - $FILENAME_AND_MODULE_TYPE_HASH.cache: a hash of filename + module type
 CompileCacheEnableResult CompileCacheHandler::Enable(Environment* env,
-                                                     const std::string& dir) {
+                                                     const std::string& dir,
+                                                     bool portable) {
   std::string cache_tag = GetCacheVersionTag();
-  std::string absolute_cache_dir_base = PathResolve(env, {dir});
-  std::string cache_dir_with_tag =
-      absolute_cache_dir_base + kPathSeparator + cache_tag;
+  std::string base_dir = dir;
+  if (!portable) {
+    base_dir = PathResolve(env, {dir});
+  }
+
+  std::string cache_dir_with_tag = base_dir + kPathSeparator + cache_tag;
   CompileCacheEnableResult result;
   Debug("[compile cache] resolved path %s + %s -> %s\n",
         dir,
@@ -546,8 +589,11 @@ CompileCacheEnableResult CompileCacheHandler::Enable(Environment* env,
     return result;
   }
 
-  result.cache_directory = absolute_cache_dir_base;
+  result.cache_directory = base_dir;
   compile_cache_dir_ = cache_dir_with_tag;
+  absolute_compile_cache_dir_ = PathResolve(env, {compile_cache_dir_});
+  portable_ = portable;
+  normalized_compile_cache_dir_ = NormalizePath(absolute_compile_cache_dir_);
   result.status = CompileCacheEnableStatus::ENABLED;
   return result;
 }

@@ -1,3 +1,4 @@
+#include "ada.h"
 #include "path.h"
 #include <string>
 #include <vector>
@@ -88,6 +89,10 @@ std::string NormalizeString(const std::string_view path,
 }
 
 #ifdef _WIN32
+constexpr bool IsWindowsDriveLetter(const std::string_view path) noexcept {
+  return path.size() > 2 && IsWindowsDeviceRoot(path[0]) &&
+         (path[1] == ':' && (path[2] == '/' || path[2] == '\\'));
+}
 constexpr bool IsWindowsDeviceRoot(const char c) noexcept {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
@@ -331,6 +336,41 @@ void FromNamespacedPath(std::string* path) {
     *path = path->substr(4);
   }
 #endif
+}
+
+
+// Check if a path looks like an absolute path or file URL.
+bool IsAbsoluteFilePath(std::string_view path) {
+  if (path.rfind("file://", 0) == 0) {
+    return true;
+  }
+#ifdef _WIN32
+  if (path.size() > 0 && path[0] == '\\') return true;
+  if (IsWindowsDriveLetter(path)) return true;
+#endif
+  if (path.size() > 0 && path[0] == '/') return true;
+  return false;
+}
+
+std::string NormalizePath(std::string_view path) {
+  std::string normalized_string(path);
+  constexpr std::string_view file_scheme = "file://";
+  if (normalized_string.rfind(file_scheme, 0) == 0) {
+    auto out = ada::parse<ada::url_aggregator>(normalized_string);
+    normalized_string = out->get_pathname();
+  }
+  normalized_string = NormalizeString(normalized_string, false, "/");
+  #ifdef _WIN32
+    if (IsWindowsDriveLetter(normalized_string)) {
+      normalized_string[0] = ToLower(normalized_string[0]);
+    }
+    for (char& c : normalized_string) {
+      if (c == '\\') {
+        c = '/';
+      }
+    }
+  #endif
+  return normalized_string;
 }
 
 }  // namespace node
